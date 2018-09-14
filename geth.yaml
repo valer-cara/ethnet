@@ -1,0 +1,166 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: genesis
+  namespace: eth
+data:
+  genesis.json: |
+    {
+        "config": {
+            "chainId": 15,
+            "homesteadBlock": 0,
+            "eip155Block": 0,
+            "eip158Block": 0
+        },
+        "difficulty": "200000000",
+        "gasLimit": "2100000",
+        "alloc": {
+            "7df9a875a174b3bc565e6424a0050ebc1b2d1d82": { "balance": "300000" },
+            "f41c74c9ae680c1aa78f42e5647a62f353b7bdde": { "balance": "400000" }
+        }
+    }
+
+---
+
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  labels:
+    app: geth-boot
+  name: geth-boot
+  namespace: eth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: geth-boot
+  template:
+    metadata:
+      labels:
+        app: geth-boot
+    spec:
+      containers:
+      - image: ethereum/client-go:alltools-latest
+        name: boot
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          test -f /shared/boot.key || bootnode -genkey=/shared/boot.key
+          bootnode -nodekey=/shared/boot.key -writeaddress | tee /shared/bootnode-address
+          bootnode -nodekey=/shared/boot.key
+
+        ports:
+        - containerPort: 30301
+          name: boot
+          protocol: UDP
+
+        volumeMounts:
+        - name: shared
+          mountPath: /shared
+
+      volumes:
+      - name: shared
+        hostPath:
+          path: "/home/blk/play/eth-network/shared-kube"
+          type: DirectoryOrCreate
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    app: geth-boot
+  name: geth-boot
+  selfLink: /api/v1/namespaces/eth/services/geth-boot
+spec:
+  ports:
+  - name: boot
+    port: 30301
+    protocol: UDP
+    targetPort: 30301
+  selector:
+    app: geth-boot
+  sessionAffinity: None
+  type: ClusterIP
+status:
+  loadBalancer: {}
+
+---
+
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  labels:
+    app: geth
+    tier: nodes
+  name: geth
+  namespace: eth
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: geth
+      tier: nodes
+  template:
+    metadata:
+      labels:
+        app: geth
+        tier: nodes
+    spec:
+      initContainers:
+      - image: ethereum/client-go
+        imagePullPolicy: IfNotPresent
+        name: init
+        args:
+        - init
+        - --datadir=/eth/db
+        - /eth/genesis/genesis.json
+        volumeMounts:
+        - name: genesis
+          mountPath: "/eth/genesis"
+        - name: db
+          mountPath: "/eth/db"
+
+      containers:
+      - image: ethereum/client-go
+        imagePullPolicy: IfNotPresent
+        name: geth
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+            BOOTNODE_ADDRESS=$(cat /shared/bootnode-address)
+            BOOTNODE_IP=$(getent hosts geth-boot | awk '{print $1}')
+            geth --datadir=/eth/db \
+                 --bootnodes=enode://$BOOTNODE_ADDRESS@$BOOTNODE_IP:30301 \
+                 --rpc --rpcvhosts="*" --rpcapi eth,web3,net,debug --v5disc --rpcaddr=0.0.0.0
+
+        ports:
+        - containerPort: 30303
+          name: eth
+          protocol: TCP
+        - containerPort: 8545
+          name: http
+          protocol: TCP
+        - containerPort: 8546
+          name: ws
+          protocol: TCP
+
+        volumeMounts:
+        - name: shared
+          mountPath: /shared
+        - name: db
+          mountPath: "/eth/db"
+
+      volumes:
+        - name: genesis
+          configMap:
+            name: genesis
+        - name: db
+          emptyDir: {}
+        - name: shared
+          hostPath:
+            path: "/home/blk/play/eth-network/shared-kube"
+            type: DirectoryOrCreate
+

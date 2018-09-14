@@ -1,3 +1,12 @@
+#
+# Genesis block seeding all nodes
+#
+# Note that .config.chainId should match the --networkid argument in geth
+# This solves an issue with metamask + sending transaction erroring out
+#
+# To clear everything and start from a different genesis, simply edit the
+# genesis info and delete all pods (since storage is ephemeral)
+
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,15 +21,19 @@ data:
             "eip155Block": 0,
             "eip158Block": 0
         },
-        "difficulty": "200000000",
+        "difficulty": "2",
         "gasLimit": "2100000",
         "alloc": {
-            "7df9a875a174b3bc565e6424a0050ebc1b2d1d82": { "balance": "300000" },
-            "f41c74c9ae680c1aa78f42e5647a62f353b7bdde": { "balance": "400000" }
+            "0xC2cd2e6D5C18f375D7A730bd14CF1946F8d2793F": { "balance": "1000000000000000000000000000000" },
+            "1100000000000000000000000000000000000000": { "balance": "0" }
         }
     }
 
 ---
+
+#
+# Bootnode nodes
+#
 
 apiVersion: extensions/v1beta1
 kind: Deployment
@@ -89,6 +102,8 @@ status:
 
 ---
 
+# Non-mining nodes
+
 apiVersion: extensions/v1beta1
 kind: Deployment
 metadata:
@@ -122,7 +137,6 @@ spec:
           mountPath: "/eth/genesis"
         - name: db
           mountPath: "/eth/db"
-
       containers:
       - image: ethereum/client-go
         imagePullPolicy: IfNotPresent
@@ -134,8 +148,8 @@ spec:
             BOOTNODE_IP=$(getent hosts geth-boot | awk '{print $1}')
             geth --datadir=/eth/db \
                  --bootnodes=enode://$BOOTNODE_ADDRESS@$BOOTNODE_IP:30301 \
-                 --rpc --rpcvhosts="*" --rpcapi eth,web3,net,debug --v5disc --rpcaddr=0.0.0.0
-
+                 --rpc --rpcvhosts="*" --rpcapi admin,eth,web3,net,debug --v5disc --rpcaddr=0.0.0.0 \
+                 --networkid 15
         ports:
         - containerPort: 30303
           name: eth
@@ -146,13 +160,11 @@ spec:
         - containerPort: 8546
           name: ws
           protocol: TCP
-
         volumeMounts:
         - name: shared
           mountPath: /shared
         - name: db
           mountPath: "/eth/db"
-
       volumes:
         - name: genesis
           configMap:
@@ -163,4 +175,106 @@ spec:
           hostPath:
             path: "/home/blk/play/eth-network/shared-kube"
             type: DirectoryOrCreate
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: geth-nodes
+  name: geth-nodes
+spec:
+  ports:
+  - name: http
+    port: 8545
+    protocol: TCP
+  selector:
+    app: geth
+    tier: nodes
+  sessionAffinity: None
+  type: ClusterIP
+status:
+  loadBalancer: {}
+
+---
+
+# Mining nodes
+
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  labels:
+    app: geth
+    tier: miners
+  name: geth-miner
+  namespace: eth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: geth
+      tier: miners
+  template:
+    metadata:
+      labels:
+        app: geth
+        tier: miners
+    spec:
+      initContainers:
+      - image: ethereum/client-go
+        imagePullPolicy: IfNotPresent
+        name: init
+        args:
+        - init
+        - --datadir=/eth/db
+        - /eth/genesis/genesis.json
+        volumeMounts:
+        - name: genesis
+          mountPath: "/eth/genesis"
+        - name: db
+          mountPath: "/eth/db"
+      containers:
+      - image: ethereum/client-go
+        imagePullPolicy: IfNotPresent
+        name: geth
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+            BOOTNODE_ADDRESS=$(cat /shared/bootnode-address)
+            BOOTNODE_IP=$(getent hosts geth-boot | awk '{print $1}')
+            geth --datadir=/eth/db \
+                 --bootnodes=enode://$BOOTNODE_ADDRESS@$BOOTNODE_IP:30301 \
+                 --rpc --rpcvhosts="*" --rpcapi admin,eth,web3,net,debug --v5disc --rpcaddr=0.0.0.0 \
+                 --mine --minerthreads=1 --extradata=$(hostname) --etherbase "1100000000000000000000000000000000000000" \
+                 --networkid 15
+        resources:
+          limits:
+            cpu: "1000m"
+        ports:
+        - containerPort: 30303
+          name: eth
+          protocol: TCP
+        - containerPort: 8545
+          name: http
+          protocol: TCP
+        - containerPort: 8546
+          name: ws
+          protocol: TCP
+        volumeMounts:
+        - name: shared
+          mountPath: /shared
+        - name: db
+          mountPath: "/eth/db"
+      volumes:
+        - name: genesis
+          configMap:
+            name: genesis
+        - name: db
+          emptyDir: {}
+        - name: shared
+          hostPath:
+            path: "/home/blk/play/eth-network/shared-kube"
+            type: DirectoryOrCreate
+
 
